@@ -231,13 +231,26 @@ def get_yf_session() -> requests.Session:
 
 @st.cache_data(ttl=3600)
 def fetch_data(ticker: str, period: str = "5y") -> pd.DataFrame:
-    time.sleep(1)  # reduce request frequency on shared Cloud IPs
-    session = get_yf_session()
-    df = yf.download(ticker, period=period, auto_adjust=True,
-                     progress=False, session=session)
-    df.index = pd.to_datetime(df.index)
-    df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-    return df
+    last_err = None
+    for attempt in range(4):
+        try:
+            time.sleep(1 + attempt)          # 1s, 2s, 3s, 4s back-off
+            # Attempt 0-1: with custom session; 2-3: plain (no session)
+            if attempt < 2:
+                session = get_yf_session()
+                df = yf.download(ticker, period=period, auto_adjust=True,
+                                 progress=False, session=session)
+            else:
+                df = yf.download(ticker, period=period, auto_adjust=True,
+                                 progress=False)
+            if df is not None and not df.empty:
+                df.index = pd.to_datetime(df.index)
+                df.columns = [c[0] if isinstance(c, tuple) else c
+                               for c in df.columns]
+                return df
+        except Exception as e:
+            last_err = e
+    raise ValueError(f"Could not fetch data for {ticker}: {last_err}")
 
 @st.cache_data(ttl=3600)
 def fetch_ff3_factors() -> pd.DataFrame:
@@ -427,14 +440,14 @@ if not run_btn:
     st.stop()
 
 # ─── LOAD DATA ────────────────────────────────
-with st.spinner(f"Fetching {ticker} data…"):
+with st.spinner(f"Fetching {ticker} data… (may take a few seconds on first load)"):
     try:
         df = fetch_data(ticker, hist_period)
-        if df.empty:
-            st.error(f"No data found for **{ticker}**. Please check the symbol.")
+        if df is None or df.empty:
+            st.error(f"❌ No data returned for **{ticker}**. Yahoo Finance may be rate-limiting. Wait 30s and try again.")
             st.stop()
     except Exception as e:
-        st.error(f"Error fetching data: {e}")
+        st.error(f"❌ Data fetch failed for **{ticker}**: {e}\n\nYahoo Finance may be temporarily rate-limiting Streamlit Cloud IPs. Please wait 30–60 seconds and click ▶ RUN ANALYSIS again.")
         st.stop()
 
 try:
@@ -537,8 +550,7 @@ with tabs[0]:
         marker_color=np.where(df["Close"].diff() >= 0, "#00e5a0", "#ff6b6b"),
         name="Volume",
     ))
-    fig_vol.update_layout(**PLOTLY_THEME, title="Volume", height=200,
-                          yaxis=dict(gridcolor="#1e2330"))
+    fig_vol.update_layout(**PLOTLY_THEME, title="Volume", height=200)
     st.plotly_chart(fig_vol, use_container_width=True)
 
     # ── Monte Carlo ──
