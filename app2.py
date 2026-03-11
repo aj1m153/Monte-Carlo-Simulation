@@ -229,28 +229,67 @@ def get_yf_session() -> requests.Session:
     })
     return session
 
+def _period_to_dates(period: str):
+    end = datetime.today()
+    mapping = {"1y": 365, "2y": 730, "3y": 1095, "5y": 1825, "10y": 3650}
+    days = mapping.get(period, 1825)
+    start = end - timedelta(days=days)
+    return start, end
+
+def _fetch_stooq(ticker: str, period: str) -> pd.DataFrame:
+    """Fallback: pull from Stooq (no API key, not rate-limited)."""
+    import pandas_datareader.data as web
+    start, end = _period_to_dates(period)
+    df = web.DataReader(ticker, "stooq", start=start, end=end)
+    df = df.sort_index()
+    return df
+
+def _fetch_yfinance(ticker: str, period: str) -> pd.DataFrame:
+    session = get_yf_session()
+    df = yf.download(ticker, period=period, auto_adjust=True,
+                     progress=False, session=session)
+    if df is not None and not df.empty:
+        df.index = pd.to_datetime(df.index)
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    return df
+
 @st.cache_data(ttl=3600)
 def fetch_data(ticker: str, period: str = "5y") -> pd.DataFrame:
-    last_err = None
-    for attempt in range(4):
-        try:
-            time.sleep(1 + attempt)          # 1s, 2s, 3s, 4s back-off
-            # Attempt 0-1: with custom session; 2-3: plain (no session)
-            if attempt < 2:
-                session = get_yf_session()
-                df = yf.download(ticker, period=period, auto_adjust=True,
-                                 progress=False, session=session)
-            else:
-                df = yf.download(ticker, period=period, auto_adjust=True,
-                                 progress=False)
-            if df is not None and not df.empty:
-                df.index = pd.to_datetime(df.index)
-                df.columns = [c[0] if isinstance(c, tuple) else c
-                               for c in df.columns]
-                return df
-        except Exception as e:
-            last_err = e
-    raise ValueError(f"Could not fetch data for {ticker}: {last_err}")
+    """Try yfinance first; fall back to Stooq if rate-limited."""
+    # --- attempt 1: yfinance with session ---
+    try:
+        time.sleep(0.5)
+        df = _fetch_yfinance(ticker, period)
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
+
+    # --- attempt 2: yfinance plain ---
+    try:
+        time.sleep(1)
+        df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+        if df is not None and not df.empty:
+            df.index = pd.to_datetime(df.index)
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            return df
+    except Exception:
+        pass
+
+    # --- attempt 3: Stooq fallback ---
+    try:
+        time.sleep(0.5)
+        df = _fetch_stooq(ticker, period)
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
+
+    raise ValueError(
+        f"All data sources failed for '{ticker}'. "
+        "Yahoo Finance may be rate-limiting Streamlit Cloud. "
+        "Try again in 60 seconds."
+    )
 
 @st.cache_data(ttl=3600)
 def fetch_ff3_factors() -> pd.DataFrame:
